@@ -25,6 +25,7 @@ from openai.types.chat.chat_completion_token_logprob import (
     TopLogprob,
 )
 from openai.types.completion_usage import (
+    CompletionTokensDetails,
     CompletionUsage,
     PromptTokensDetails,
 )
@@ -802,6 +803,52 @@ async def test_get_response_traces_usage_on_truncated_empty_turn(monkeypatch) ->
     assert generation.span_data.usage["requests"] == 1
     assert generation.span_data.usage["input_tokens"] == 7
     assert generation.span_data.usage["total_tokens"] == 7
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_run_counts_usage_of_truncated_empty_turn(monkeypatch) -> None:
+    """A reasoning budget exhausted before any visible output is still billed, so the run's
+    usage must include the tokens the provider reported for the failed call."""
+    chat = ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[
+            Choice(
+                index=0,
+                finish_reason="length",
+                message=ChatCompletionMessage(role="assistant", content=""),
+            )
+        ],
+        usage=CompletionUsage(
+            completion_tokens=500,
+            prompt_tokens=120,
+            total_tokens=620,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=20),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=500),
+        ),
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    agent = Agent(name="agent", model=OpenAIProvider(use_responses=False).get_model("gpt-4"))
+
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'") as exc_info:
+        await Runner.run(agent, "hi", run_config=RunConfig(tracing_disabled=True))
+
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    usage = run_data.context_wrapper.usage
+    assert usage.requests == 1
+    assert usage.input_tokens == 120
+    assert usage.output_tokens == 500
+    assert usage.total_tokens == 620
+    assert usage.input_tokens_details.cached_tokens == 20
+    assert usage.output_tokens_details.reasoning_tokens == 500
 
 
 @pytest.mark.allow_call_model_methods

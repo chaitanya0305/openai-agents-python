@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses as _dc
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager
 from functools import partial
 from typing import Any, TypeVar, cast
 from uuid import uuid4
@@ -2419,6 +2419,17 @@ async def start_streaming(
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 
 
+@asynccontextmanager
+async def record_terminal_usage_on_error(run_usage: Usage) -> AsyncIterator[None]:
+    """Count provider-reported usage carried by a failed or truncated model call."""
+    try:
+        yield
+    except ModelBehaviorError as error:
+        if error._terminal_usage is not None:
+            run_usage.add(error._terminal_usage)
+        raise
+
+
 async def run_single_turn_streamed(
     streamed_result: RunResultStreaming,
     bindings: AgentBindings[TContext],
@@ -2666,7 +2677,10 @@ async def run_single_turn_streamed(
 
     # Raising out of this loop leaves the model stream suspended at its yield, so close it
     # explicitly instead of waiting for garbage collection to finalize the generator chain.
-    async with aclosing(model_run_context_stream(retry_stream, tool_use_tracker)) as model_events:
+    async with (
+        aclosing(model_run_context_stream(retry_stream, tool_use_tracker)) as model_events,
+        record_terminal_usage_on_error(context_wrapper.usage),
+    ):
         async for event in model_events:
             stream_event_count += 1
             last_stream_event_type = getattr(event, "type", None)
@@ -2688,8 +2702,6 @@ async def run_single_turn_streamed(
                     event_type,
                     maybe_response if isinstance(maybe_response, Response) else None,
                 )
-                if terminal_error._terminal_usage is not None:
-                    context_wrapper.usage.add(terminal_error._terminal_usage)
                 raise terminal_error
             elif getattr(event, "type", None) in {"error", "response.error"}:
                 raise response_error_event_failure_error(cast(str, event.type), event)

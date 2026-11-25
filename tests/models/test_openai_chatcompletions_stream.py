@@ -3822,6 +3822,43 @@ async def test_handler_stream_raises_on_length_truncation() -> None:
         await _collect_handler_events(terminal, raise_on_length_truncation=True)
 
 
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_streamed_run_counts_usage_of_truncated_empty_turn(monkeypatch) -> None:
+    """A streamed reasoning budget exhausted before any visible output is still billed, so the
+    run's usage must include the tokens the provider reported for the failed call."""
+    usage = CompletionUsage(
+        completion_tokens=500,
+        prompt_tokens=120,
+        total_tokens=620,
+        prompt_tokens_details=PromptTokensDetails(cached_tokens=20),
+        completion_tokens_details=CompletionTokensDetails(reasoning_tokens=500),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="length")])
+        yield _chunk_with([], usage=usage)
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return _empty_response(), fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    agent = Agent(name="agent", model=OpenAIProvider(use_responses=False).get_model("gpt-4"))
+
+    result = Runner.run_streamed(agent, "hi")
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        async for _ in result.stream_events():
+            pass
+
+    run_usage = result.context_wrapper.usage
+    assert run_usage.requests == 1
+    assert run_usage.input_tokens == 120
+    assert run_usage.output_tokens == 500
+    assert run_usage.total_tokens == 620
+    assert run_usage.input_tokens_details.cached_tokens == 20
+    assert run_usage.output_tokens_details.reasoning_tokens == 500
+
+
 @pytest.mark.asyncio
 async def test_handler_stream_length_is_ignored_without_internal_option() -> None:
     """Without the internal option, a length terminal with no output must keep the

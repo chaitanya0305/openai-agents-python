@@ -1506,6 +1506,60 @@ async def test_sandbox_memory_fallback_does_not_mutate_run_config() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_sandbox_memory_maps_session_ids_that_are_not_file_safe(streamed: bool) -> None:
+    client = FilesystemTestSandboxClient()
+    session = await client.create(manifest=Manifest())
+    phase_one_model = ScriptedModel(steps=[[_phase_one_message()], [_phase_one_message()]])
+    agent_model = ScriptedModel()
+    agent_model.extend(
+        [
+            [get_final_output_message("first done")],
+            [get_final_output_message("second done")],
+        ]
+    )
+    agent = SandboxAgent(
+        name="worker",
+        model=agent_model,
+        instructions="Worker.",
+        capabilities=[_memory_config(phase_one_model=phase_one_model)],
+    )
+
+    closed = False
+    try:
+        run_config = _run_config_for_session(session)
+        for session_id, prompt in [("user:42", "first"), ("user_42", "second")]:
+            if streamed:
+                streamed_result = Runner.run_streamed(
+                    agent, prompt, session=SQLiteSession(session_id), run_config=run_config
+                )
+                async for _ in streamed_result.stream_events():
+                    pass
+            else:
+                await Runner.run(
+                    agent, prompt, session=SQLiteSession(session_id), run_config=run_config
+                )
+
+        root = Path(session.state.manifest.root)
+        rollouts = sorted(path.name for path in (root / "sessions").glob("*.jsonl"))
+        assert len(rollouts) == 2
+        unsafe_rollout_id = memory_manager_module.memory_rollout_id_for_grouping_id("user:42")
+        assert unsafe_rollout_id.startswith("user_42-")
+        assert rollouts == sorted([f"{unsafe_rollout_id}.jsonl", "user_42.jsonl"])
+
+        await session.aclose()
+        closed = True
+
+        assert len(phase_one_model.calls) == 2
+        raw_memories = sorted(
+            path.name for path in (root / "memories" / "raw_memories").glob("*.md")
+        )
+        assert raw_memories == sorted([f"{unsafe_rollout_id}.md", "user_42.md"])
+    finally:
+        await _cleanup_session(client, session, close=not closed)
+
+
+@pytest.mark.asyncio
 async def test_sandbox_memory_uses_conversation_id_when_sdk_session_is_absent() -> None:
     client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import posixpath
@@ -33,6 +34,7 @@ from .storage import SandboxMemoryStorage
 logger = logging.getLogger(__name__)
 
 _ROLLOUT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_UNSAFE_ROLLOUT_ID_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _STOP = object()
 _MemoryLayoutKey = tuple[str, str]
 _MEMORY_GENERATION_MANAGERS: weakref.WeakKeyDictionary[
@@ -323,6 +325,21 @@ def _validate_rollout_id(rollout_id: str) -> str:
             "letters, numbers, '.', '_', or '-'."
         )
     return normalized_rollout_id
+
+
+def memory_rollout_id_for_grouping_id(grouping_id: str) -> str:
+    """Return a file-safe memory rollout ID for a conversation, session, or group ID.
+
+    File-safe IDs are used unchanged. Other IDs, such as ``user:42`` or ``alice@example.com``,
+    keep a readable prefix and get a hash suffix so distinct IDs map to distinct rollout files.
+    """
+
+    normalized_grouping_id = grouping_id.strip()
+    if _ROLLOUT_ID_RE.fullmatch(normalized_grouping_id):
+        return normalized_grouping_id
+    digest = hashlib.sha256(normalized_grouping_id.encode("utf-8")).hexdigest()[:16]
+    prefix = _UNSAFE_ROLLOUT_ID_CHARS_RE.sub("_", normalized_grouping_id).strip("._-")[:96]
+    return f"{prefix}-{digest}" if prefix else digest
 
 
 def _rollout_file_name_for_rollout_id(rollout_id: str) -> str:

@@ -168,6 +168,7 @@ from .run_internal.tool_use_tracker import (
     serialize_tool_use_tracker,
 )
 from .run_state import RunState
+from .sandbox.memory.manager import memory_rollout_id_for_grouping_id
 from .sandbox.memory.rollouts import terminal_metadata_for_exception
 from .sandbox.runtime import SandboxRuntime
 from .tool import dispose_resolved_computers
@@ -257,10 +258,12 @@ def _sandbox_memory_rollout_id(
 ) -> str | None:
     if run_config.sandbox is None:
         return None
-    return resolve_run_grouping_id(
-        conversation_id=conversation_id,
-        session=session,
-        group_id=run_config.group_id,
+    return memory_rollout_id_for_grouping_id(
+        resolve_run_grouping_id(
+            conversation_id=conversation_id,
+            session=session,
+            group_id=run_config.group_id,
+        )
     )
 
 
